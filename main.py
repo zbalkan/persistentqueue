@@ -118,6 +118,7 @@ def main() -> None:
     # TODO: Use a proper weighted round-robin here (https://github.com/emate/python-WeightedRoundRobin)
     isLastFromPQ: bool = False
 
+    # TODO: Add Leaky Bucket controls into the loop
     while (True):  # TODO: Add sliding window statistic collection with Prometheus: average EPS generated, EPS sent, EPS failed, q size, pq size
 
         # We generate a 20 char random string on every cycle
