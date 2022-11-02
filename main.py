@@ -8,10 +8,12 @@ from datetime import datetime
 
 from ulid import ULID
 
-DATABASE: str = "queue.db"
 BUFFER_SIZE: int = 5000
 MAX_EPS: int = 500
-NETWORK_LOSS_PROBABILITY_PERCENT: int = 1
+
+DATABASE: str = "queue.db"  # New
+
+NETWORK_LOSS_PROBABILITY_PERCENT: int = 1  # Simulation only
 
 
 class InMemoryQueue():
@@ -112,15 +114,17 @@ def main() -> None:
     pq: PersistentQueue = PersistentQueue()
     lastSent: datetime = datetime.now()
     delayMs: float = 1000 / MAX_EPS
-    # a simple value fo round robin switchinhg between q and pq.
+    # a simple value fo round robin switching between q and pq.
+    # TODO: Use a proper weighted round-robin here (https://github.com/emate/python-WeightedRoundRobin)
     isLastFromPQ: bool = False
 
-    while (True):  # TODO: Add sliding window statistic collection with Prometheus: average EPS generated, EPS sent, EPS failed
+    while (True):  # TODO: Add sliding window statistic collection with Prometheus: average EPS generated, EPS sent, EPS failed, q size, pq size
 
         # We generate a 20 char random string on every cycle
         # The assumption is a new log on every cycle, a high volume of logs
         log: str = get_random_string(20)
 
+        # TODO: New event generated. Add to stats.
         # If there is a log parsed by the agent, it is read on every cycle. Not waiting for MAX_EPS delay.
         q.push(log)
         print(f"Q Size: {q.size()}")
@@ -140,6 +144,7 @@ def main() -> None:
                     isLastFromPQ = True
 
             if (try_send(next)):
+                # TODO: Succesfully sent. Add to stats.
                 if isLastFromPQ:
                     _: str = pq.pop()  # Get it out of the queue
                     print(f"PQ Size: {pq.size()}")
@@ -147,6 +152,7 @@ def main() -> None:
                     _: str = q.pop()
                     print(f"Q Size: {q.size()}")
             else:
+                # TODO: Failed to send. Add to stats.
                 pq.push(next)  # No network connection, send to PQ
                 print(f"PQ Size: {pq.size()}")
 
