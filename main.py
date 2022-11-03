@@ -7,16 +7,36 @@ import time
 from datetime import datetime
 
 from ulid import ULID
+import roundrobin
 
 BUFFER_SIZE: int = 5000
 MAX_EPS: int = 500
 
 DATABASE: str = "queue.db"  # New
 
+# We use weighted round-robin algorithm between two queues.
+# Current implementation has equal weights.
+IN_MEMORY_Q_WEIGHT: int = 1  # New
+PERSISTENT_Q_WEIGHT: int = 1  # New
+
 NETWORK_LOSS_PROBABILITY_PERCENT: int = 1  # Simulation only
 
 
-class InMemoryQueue():
+class Queue():
+    def push(self, item: str) -> None:
+        pass
+
+    def peek(self) -> str:
+        return ""
+
+    def pop(self) -> str:
+        return ""
+
+    def size(self) -> int:
+        return 0
+
+
+class InMemoryQueue(Queue):
     __queue: list[str]
     __maxSize: int
 
@@ -38,7 +58,7 @@ class InMemoryQueue():
         return len(self.__queue)
 
 
-class PersistentQueue():
+class PersistentQueue(Queue):
     __con: sqlite3.Connection
     __cur: sqlite3.Cursor
 
@@ -108,54 +128,54 @@ def get_random_string(length) -> str:
     result_str: str = ''.join(random.choice(letters) for i in range(length))
     return result_str
 
+# This is an approximation of dispatch_buffer function in buffer.c (https://github.com/wazuh/wazuh/blob/8b613b4ff11873a9a189acfcb19db6688858cafc/src/client-agent/buffer.c#L138)
+
 
 def main() -> None:
     q: InMemoryQueue = InMemoryQueue(BUFFER_SIZE)
     pq: PersistentQueue = PersistentQueue()
     lastSent: datetime = datetime.now()
     delayMs: float = 1000 / MAX_EPS
-    # a simple value fo round robin switching between q and pq.
-    # TODO: Use a proper weighted round-robin here (https://github.com/emate/python-WeightedRoundRobin)
-    isLastFromPQ: bool = False
+
+    # WRR implementation
+    get_weighted = roundrobin.weighted(
+        [(q, IN_MEMORY_Q_WEIGHT), (pq, PERSISTENT_Q_WEIGHT)])
 
     # TODO: Add Leaky Bucket controls into the loop
     while (True):  # TODO: Add sliding window statistic collection with Prometheus: average EPS generated, EPS sent, EPS failed, q size, pq size
 
-        # We generate a 20 char random string on every cycle
-        # The assumption is a new log on every cycle, a high volume of logs
+        # We generate a 20 char random string on every cycle.
+        # The assumption is a new log on every cycle: a high volume of logs
         log: str = get_random_string(20)
 
         # TODO: New event generated. Add to stats.
         # If there is a log parsed by the agent, it is read on every cycle. Not waiting for MAX_EPS delay.
         q.push(log)
-        print(f"Q Size: {q.size()}")
+        print(f"Q Size: {q.size()}\nPQ Size: {pq.size()}")
 
         # Even though we read logs in an non-deterministic manner, we should send them under MAX_EPS
         if (is_time_up(delayMs, lastSent)):
+            buffer: Queue
+
             # If pq is empty, send from buffer. If pq has at least 1 value, start round robin.
             if (pq.size() == 0):
-                next: str = q.peek()
-                isLastFromPQ = False
+                buffer = q
             else:
-                if (isLastFromPQ):
-                    next: str = q.peek()
-                    isLastFromPQ = False
-                else:
-                    next: str = pq.peek()
-                    isLastFromPQ = True
+                buffer = get_weighted()  # type: ignore
+
+            next: str = buffer.peek()
 
             if (try_send(next)):
                 # TODO: Succesfully sent. Add to stats.
-                if isLastFromPQ:
-                    _: str = pq.pop()  # Get it out of the queue
-                    print(f"PQ Size: {pq.size()}")
-                else:
-                    _: str = q.pop()
-                    print(f"Q Size: {q.size()}")
+                # Pop the sent log out ot the queue
+                _: str = buffer.pop()
+
             else:
                 # TODO: Failed to send. Add to stats.
-                pq.push(next)  # No network connection, send to PQ
-                print(f"PQ Size: {pq.size()}")
+                # No network connection, send to PQ
+                pq.push(next)
+
+            print(f"Q Size: {q.size()}\nPQ Size: {pq.size()}")
 
 
 if __name__ == "__main__":
