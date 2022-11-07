@@ -6,7 +6,6 @@ import sys
 import time
 from datetime import datetime
 
-from ulid import ULID
 import roundrobin
 
 BUFFER_SIZE: int = 5000
@@ -18,6 +17,9 @@ DATABASE: str = "queue.db"  # New
 # Current implementation has equal weights.
 IN_MEMORY_Q_WEIGHT: int = 1  # New
 PERSISTENT_Q_WEIGHT: int = 1  # New
+
+RETENTION_MINUTES: int = 2 * 24 * 60  # New. Remove logs older than 2 days.
+MAX_DB_SIZE_MB: int = 100  # New. Remove older logs if the size is higher
 
 NETWORK_LOSS_PROBABILITY_PERCENT: int = 1  # Simulation only
 
@@ -74,11 +76,11 @@ class PersistentQueue(Queue):
 
         self.__cur = self.__con.cursor()
         self.__cur.execute(
-            "CREATE TABLE  IF NOT EXISTS logs(timestamp TEXT, log TEXT);")
+            "CREATE TABLE  IF NOT EXISTS logs(timestamp TEXT PRIMARY KEY, log TEXT);")
         self.__con.commit()
 
     def push(self, item: str) -> None:
-        id: str = str(ULID.from_timestamp(time.time()))
+        id: str = str(time.time() * 1000)  # Get timestamp in milliseconds
         self.__cur.execute("INSERT INTO logs VALUES (?, ?);", (id, item))
         self.__con.commit()
 
@@ -99,6 +101,30 @@ class PersistentQueue(Queue):
         self.__cur.execute("SELECT COUNT(log) FROM logs;")
         count: int = self.__cur.fetchone()[0]
         return count
+
+    def recycle(self, max_minutes: int, max_size_mb: int) -> None:  # This needs optimization
+        # Check page count first as size is generally the first threshold to reach.
+
+        # A page in SQLite is 65536bytes. So 1MB = 16 pages.
+        # Ref: https://www.sqlite.org/limits.html#:~:text=Maximum%20Number%20Of%20Pages%20In%20A%20Database%20File&text=The%20largest%20possible%20setting%20for,size%20of%20about%20281%20terabytes.
+        maxPageCount: int = max_size_mb * 16
+        while (self.__get_page_count() > maxPageCount):
+            _ = self.pop()
+
+        now: datetime = datetime.now()
+        while (True):
+            self.__cur.execute("SELECT timestamp FROM logs LIMIT 1;")
+            timestamp = self.__cur.fetchone()
+            ts: datetime = datetime.fromtimestamp(timestamp)
+            diff = now - ts
+            if (diff.seconds >= (max_minutes * 60)):
+                break  # Fail fast
+            else:
+                _: str = self.pop()
+
+    def __get_page_count(self) -> int:
+        self.__cur.execute("PRAGMA PAGE_COUNT;")
+        return int(self.__cur.fetchone())
 
 
 def is_time_up(expectedDelay: float, lastSent: datetime) -> bool:
@@ -157,7 +183,7 @@ def main() -> None:
         if (is_time_up(delayMs, lastSent)):
             buffer: Queue
 
-            # If pq is empty, send from buffer. If pq has at least 1 value, start round robin.
+            # If pq is empty, send from q. If pq has at least 1 value, start round robin.
             if (pq.size() == 0):
                 buffer = q
             else:
@@ -172,8 +198,11 @@ def main() -> None:
 
             else:
                 # TODO: Failed to send. Add to stats.
-                # No network connection, send to PQ
+                # No network connection, send to pq
                 pq.push(next)
+
+            # Limit database by date and size
+            pq.recycle(RETENTION_MINUTES, MAX_DB_SIZE_MB)
 
             print(f"Q Size: {q.size()}\nPQ Size: {pq.size()}")
 
